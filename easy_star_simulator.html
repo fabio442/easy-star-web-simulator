@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>EasyStar Web Simulator</title>
+<style>
+  body, html { margin:0; padding:0; overflow:hidden; background:#87ceeb; }
+  canvas { display:block; margin:0 auto; background: linear-gradient(to top, #6ca0dc 0%, #a3d9ff 100%); }
+  #info { position: fixed; top: 10px; left: 10px; color: #fff; font-family: sans-serif; background: rgba(0,0,0,0.3); padding: 10px; border-radius: 6px; }
+</style>
+</head>
+<body>
+<div id="info">
+  <b>EasyStar Web Simulator</b><br/>
+  Steuerung:<br/>
+  Gas: W/S oder Pfeil Hoch/Runter<br/>
+  Höhe: Pfeil Hoch/Runter<br/>
+  Seite: A/D oder Pfeil Links/Rechts<br/>
+  Roll: Q/E (optional)<br/>
+  <br/>
+  Landung: zu schnell = Schaden!<br/>
+  Motor: nur vorwärts Gas<br/>
+  <br/>
+  <span id="damageStatus"></span>
+</div>
+<canvas id="canvas"></canvas>
+
+<script>
+(() => {
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  let width, height;
+  function resize() {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = width;
+    canvas.height = height;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // Flugzeug-Parameter
+  const mass = 0.9; // kg
+  const wingArea = 0.45; // m²
+  const airDensity = 1.225;
+  const liftSlope = 5.7;
+  const maxLiftCoeff = 1.2;
+  const dragCoeff = 0.03;
+  const maxThrust = 18;
+
+  // Zustände
+  let pos = { x: width/2, y: height/2 };
+  let velocity = { x: 0, y: 0 };
+  let angle = 0; // Radians, 0 = nach rechts
+  let angularVelocity = 0;
+  let throttle = 0;
+  let pitchInput = 0;
+  let yawInput = 0;
+  let rollInput = 0;
+  let damage = 0;
+
+  // Steuerung
+  const keys = {};
+  window.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; });
+  window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+  function clamp(x, min, max) { return Math.min(Math.max(x, min), max); }
+
+  // Physik-Simulation
+  function physicsStep(dt) {
+    // Input auswerten
+    throttle = 0;
+    if (keys['w'] || keys['arrowup']) throttle += 1;
+    if (keys['s'] || keys['arrowdown']) throttle -= 1;
+    throttle = clamp(throttle, 0, 1); // Gas nur vorwärts
+
+    pitchInput = 0;
+    if (keys['arrowup']) pitchInput = 1;
+    if (keys['arrowdown']) pitchInput = -1;
+
+    yawInput = 0;
+    if (keys['a'] || keys['arrowleft']) yawInput = -1;
+    if (keys['d'] || keys['arrowright']) yawInput = 1;
+
+    rollInput = 0;
+    if (keys['q']) rollInput = -1;
+    if (keys['e']) rollInput = 1;
+
+    // Geschwindigkeit & Winkel
+    const speed = Math.sqrt(velocity.x*velocity.x + velocity.y*velocity.y);
+    const velocityAngle = Math.atan2(velocity.y, velocity.x);
+
+    // Anstellwinkel = Winkel Flugzeug vs Geschwindigkeit
+    let aoa = angle - velocityAngle;
+    while (aoa > Math.PI) aoa -= 2 * Math.PI;
+    while (aoa < -Math.PI) aoa += 2 * Math.PI;
+
+    // Auftriebsbeiwert
+    let cl = liftSlope * aoa;
+    cl = clamp(cl, -maxLiftCoeff, maxLiftCoeff);
+
+    // Stall (Strömungsabriss)
+    const stallSpeed = 7.5;
+    if (speed < stallSpeed) {
+      const stallFactor = (stallSpeed - speed) / stallSpeed;
+      cl *= (1 - 0.6 * stallFactor);
+    }
+
+    // Auftriebskraft
+    const lift = 0.5 * airDensity * speed * speed * wingArea * cl;
+
+    // Luftwiderstand
+    const drag = dragCoeff * speed * speed;
+
+    // Kräfte in x,y (Lift senkrecht zu Geschwindigkeit)
+    const liftX = lift * Math.cos(angle + Math.PI / 2);
+    const liftY = lift * Math.sin(angle + Math.PI / 2);
+    const dragX = -drag * Math.cos(velocityAngle);
+    const dragY = -drag * Math.sin(velocityAngle);
+
+    // Motor-Schub in Flugrichtung
+    const thrust = throttle * maxThrust;
+    const thrustX = thrust * Math.cos(angle);
+    const thrustY = thrust * Math.sin(angle);
+
+    // Summe Kräfte
+    const forceX = liftX + dragX + thrustX;
+    const forceY = liftY + dragY + thrustY - mass * 9.81;
+
+    // Beschleunigung
+    const ax = forceX / mass;
+    const ay = forceY / mass;
+
+    // Geschwindigkeit updaten
+    velocity.x += ax * dt;
+    velocity.y += ay * dt;
+
+    // Position updaten
+    pos.x += velocity.x * dt * 50;
+    pos.y += velocity.y * dt * 50;
+
+    // Drehmoment (einfach modelliert)
+    const pitchTorque = pitchInput * 15;
+    const yawTorque = yawInput * 8;
+    const rollTorque = rollInput * 10;
+
+    // Winkelgeschwindigkeit updaten
+    angularVelocity += (pitchTorque + yawTorque + rollTorque) * dt;
+
+    // Winkel updaten
+    angle += angularVelocity * dt;
+    angularVelocity *= 0.98; // Dämpfung
+
+    // Boden-Kollision (unteres Fenster)
+    if (pos.y > height - 20) {
+      pos.y = height - 20;
+      velocity.y *= -0.3;
+      velocity.x *= 0.7;
+      angularVelocity *= -0.5;
+
+      // Schaden berechnen
+      const impactSpeed = Math.abs(velocity.y);
+      if (impactSpeed > 4) {
+        damage += (impactSpeed - 4) * 0.1;
+        damage = clamp(damage, 0, 1);
+      }
+      if (impactSpeed > 7) {
+        damage = 1;
+      }
+    }
+
+    // Grenzen für pos.x
+    if (pos.x < 20) { pos.x = 20; velocity.x = 0; }
+    if (pos.x > width - 20) { pos.x = width - 20; velocity.x = 0; }
+
+  }
+
+  // Zeichnen
+  function draw() {
+    ctx.clearRect(0, 0, width, height);
+
+    // Himmel + Boden
+    ctx.fillStyle = '#87ceeb';
+    ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = '#228B22';
+    ctx.fillRect(0, height - 20, width, 20);
+
+    // Flugzeug zeichnen
+    ctx.save();
+    ctx.translate(pos.x, pos.y);
+    ctx.rotate(angle);
+
+    // Schadenfarbe: von Weiß zu Rot
+    const redIntensity = damage * 255;
+    ctx.fillStyle = `rgb(255,${255 - redIntensity},${255 - redIntensity})`;
+
+    // Rumpf
+    ctx.beginPath();
+    ctx.moveTo(-30, -8);
+    ctx.lineTo(30, 0);
+    ctx.lineTo(-30, 8);
+    ctx.closePath();
+    ctx.fill();
+
+    // Flügel
+    ctx.fillStyle = `rgba(255,255,255,${1 - damage * 0.6})`;
+    ctx.beginPath();
+    ctx.moveTo(-5, -40);
+    ctx.lineTo(15, -20);
+    ctx.lineTo(50, -20);
+    ctx.lineTo(50, 20);
+    ctx.lineTo(15, 20);
+    ctx.lineTo(-5, 40);
+    ctx.closePath();
+    ctx.fill();
+
+    // Leitwerk
+    ctx.fillStyle = `rgba(255,255,255,${1 - damage * 0.6})`;
+    ctx.beginPath();
+    ctx.moveTo(-25, -10);
+    ctx.lineTo(-40, -10);
+    ctx.lineTo(-50, 0);
+    ctx.lineTo(-40, 10);
+    ctx.lineTo(-25, 10);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore();
+
+    // Damage-Text
+    const damagePercent = Math.floor(damage * 100);
+    document.getElementById('damageStatus').innerText = `Schaden: ${damagePercent}%`;
+  }
+
+  // Main Loop
+  let lastTime = performance.now();
+  function loop() {
+    const now = performance.now();
+    const dt = (now - lastTime) / 1000;
+    lastTime = now;
+
+    physicsStep(dt);
+    draw();
+
+    requestAnimationFrame(loop);
+  }
+
+  loop();
+})();
+</script>
+</body>
+</html>
